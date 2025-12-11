@@ -11,6 +11,7 @@ struct PhongShader : IShader {
     vec3 eye_pos;
     TGAColor color = {};
     vec3 tri[3];
+    vec3 normals[3]; // 存储三角形三个顶点的法线
     vec3 face_normal; // 面法线
 
     PhongShader(const Model& m, const vec3& light, const vec3& eye)
@@ -21,18 +22,12 @@ struct PhongShader : IShader {
         vec3 v = model.vert(face, vert);
         vec4 gl_Position = ModelView * vec4{ v.x, v.y, v.z, 1. };
         tri[vert] = gl_Position.xyz();
-        // 只在第2个顶点时计算面法线（因为此时三角形三个顶点都已获得）
-        if (vert == 2) {
-            vec3 v0 = tri[0];
-            vec3 v1 = tri[1];
-            vec3 v2 = tri[2];
-            face_normal = normalized((cross((v2 - v0) , (v1 - v0)))); // 叉乘求法线
-        }
+        normals[vert] = model.normal(face, vert);//获取顶点法线
         return Perspective * gl_Position;
     }
 
     virtual std::pair<bool, TGAColor> fragment(const vec3 bar) const {
-        vec3 n = face_normal;
+        vec3 n = normalized(normals[0] * bar.x + normals[1] * bar.y + normals[2] * bar.z);
         vec3 pos = tri[0] * bar.x + tri[1] * bar.y + tri[2] * bar.z;
         vec3 view_dir = normalized(eye_pos - pos);
         vec3 reflect_dir = normalized(2.f * n * (n * light_dir) - light_dir);
@@ -76,9 +71,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    constexpr int width =4096;      // output image size
-    constexpr int height =4096;
-    constexpr vec3    eye{ -0.5, 0,1.1 }; // camera position
+    constexpr int width =800;      // output image size
+    constexpr int height =800;
+    constexpr vec3    eye{ -1, 0,1 }; // camera position
     constexpr vec3 center{ 0, 0, 0 }; // camera direction
     constexpr vec3     up{ 0, 1, 0 }; // camera up vector
 
@@ -90,7 +85,7 @@ int main(int argc, char** argv) {
 
     for (int m = 1; m < argc; m++) {                    // iterate through all input objects
         Model model(argv[m]);        // load the data
-        vec3 light_dir = normalized(vec3{ -1,1, 0 });
+        vec3 light_dir = normalized(vec3{ 0,0, 1 });
         PhongShader shader(model, light_dir, eye);
         for (int f = 0; f < model.nface(); f++) {      // iterate through all facets
             shader.color = { 200, 0, 0, 255 };
