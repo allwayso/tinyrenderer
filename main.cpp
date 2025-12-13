@@ -1,4 +1,3 @@
-#include <cstdlib>
 #include "our_gl.h"
 #include "model.h"
 
@@ -7,61 +6,42 @@ extern std::vector<double> zbuffer;     // the depth buffer
 
 struct PhongShader : IShader {
     const Model& model;
-    vec3 light_dir;
-    vec3 eye_pos;
-    TGAColor color = {};
-    vec3 tri[3];
-    vec3 normals[3]; // 存储三角形三个顶点的法线
-    vec3 face_normal; // 面法线
+    vec4 l;              // light direction in eye coordinates
+    vec2 varying_uv[3];  // triangle uv coordinates, written by the vertex shader, read by the fragment shader
+    vec4 varying_nrm[3]; // normal per vertex to be interpolated by the fragment shader
+    vec4 tri[3];         // triangle in view coordinates
 
-    PhongShader(const Model& m, const vec3& light, const vec3& eye)
-        : model(m), light_dir(light), eye_pos(eye) {
+    PhongShader(const vec3 light, const Model& m) : model(m) {
+        l = normalized((ModelView * vec4{ light.x, light.y, light.z, 0. })); // transform the light vector to view coordinates
     }
 
     virtual vec4 vertex(const int face, const int vert) {
-        vec3 v = model.vert(face, vert);
-        vec4 gl_Position = ModelView * vec4{ v.x, v.y, v.z, 1. };
-        tri[vert] = gl_Position.xyz();
-        normals[vert] = model.normal(face, vert);//获取顶点法线
-        return Perspective * gl_Position;
-    }
-
-    virtual std::pair<bool, TGAColor> fragment(const vec3 bar) const {
-        vec3 n = normalized(normals[0] * bar.x + normals[1] * bar.y + normals[2] * bar.z);
-        vec3 pos = tri[0] * bar.x + tri[1] * bar.y + tri[2] * bar.z;
-        vec3 view_dir = normalized(eye_pos - pos);
-        vec3 reflect_dir = normalized(2.f * n * (n * light_dir) - light_dir);
-
-        float ambient = 0.1f;
-        float diffuse = std::max(0.0f, float(n * light_dir));
-        float spec = std::pow(std::max(0.0f, float(view_dir * reflect_dir)), 16);
-        float intensity = ambient + 0.6f * diffuse + 0.3f * spec;
-        intensity = std::clamp(intensity, 0.0f, 1.0f);
-
-        TGAColor shaded = color;
-        shaded[0] = static_cast<std::uint8_t>(intensity * 255);
-        shaded[1] = shaded[2] = 0;
-        return { false, shaded };
-    }
-};
-
-struct RandomShader : IShader {
-    const Model& model;
-    TGAColor color = {};
-    vec3 tri[3];  // triangle in eye coordinates
-
-    RandomShader(const Model& m) : model(m) {
-    }
-
-    virtual vec4 vertex(const int face, const int vert) {
-        vec3 v = model.vert(face, vert);                          // current vertex in object coordinates
-        vec4 gl_Position = ModelView * vec4{ v.x, v.y, v.z, 1. };
-        tri[vert] = gl_Position.xyz();                            // in eye coordinates
+        varying_uv[vert] = model.uv(face, vert);
+        varying_nrm[vert] = ModelView.invert_transpose() * model.normal(face, vert);
+        vec4 gl_Position = ModelView * model.vert(face, vert);
+        tri[vert] = gl_Position;
         return Perspective * gl_Position;                         // in clip coordinates
     }
 
     virtual std::pair<bool, TGAColor> fragment(const vec3 bar) const {
-        return { false, color };                                    // do not discard the pixel
+        mat<2, 4> E = { tri[1] - tri[0], tri[2] - tri[0] };
+        mat<2, 2> U = { varying_uv[1] - varying_uv[0], varying_uv[2] - varying_uv[0] };
+        mat<2, 4> T = U.invert() * E;
+        //Modelview->tangentSpace matrix
+        mat<4, 4> D = { normalized(T[0]),  // tangent vector
+                      normalized(T[1]),  // bitangent vector
+                      normalized(varying_nrm[0] * bar[0] + varying_nrm[1] * bar[1] + varying_nrm[2] * bar[2]), // interpolated normal
+                      {0,0,0,1} }; // Darboux frame
+        vec2 uv = varying_uv[0] * bar[0] + varying_uv[1] * bar[1] + varying_uv[2] * bar[2];
+        vec4 n = normalized(D.transpose() * model.normal(uv));
+        vec4 r = normalized(n * (n * l) * 2 - l);                   // reflected light direction
+        double ambient = .4;                                     // ambient light intensity
+        double diffuse = 1. * std::max(0., n * l);                 // diffuse light intensity
+        double specular = (3. * sample2D(model.specular(), uv)[0] / 255.) * std::pow(std::max(r.z, 0.), 35);  // specular intensity, note that the camera lies on the z-axis (in eye coordinates), therefore simple r.z, since (0,0,1)*(r.x, r.y, r.z) = r.z
+        TGAColor gl_FragColor = sample2D(model.diffuse(), uv);
+        for (int channel : {0, 1, 2})
+            gl_FragColor[channel] = std::min<int>(255, gl_FragColor[channel] * (ambient + diffuse + specular));
+        return { false, gl_FragColor };                             // do not discard the pixel
     }
 };
 
@@ -71,9 +51,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    constexpr int width =800;      // output image size
-    constexpr int height =800;
-    constexpr vec3    eye{ -1, 0,1 }; // camera position
+    constexpr int width = 4096;      // output image size
+    constexpr int height = 4096;
+    constexpr vec3  light{ 1, 1, 1 }; // light source
+    constexpr vec3    eye{ -1, 0, 1 }; // camera position
     constexpr vec3 center{ 0, 0, 0 }; // camera direction
     constexpr vec3     up{ 0, 1, 0 }; // camera up vector
 
@@ -81,14 +62,12 @@ int main(int argc, char** argv) {
     init_perspective(norm(eye - center));                        // build the Perspective matrix
     init_viewport(width / 16, height / 16, width * 7 / 8, height * 7 / 8); // build the Viewport    matrix
     init_zbuffer(width, height);
-    TGAImage framebuffer(width, height, TGAImage::GRAYSCALE, { 128, 0, 0, 255 });
+    TGAImage framebuffer(width, height, TGAImage::RGB);
 
     for (int m = 1; m < argc; m++) {                    // iterate through all input objects
-        Model model(argv[m]);        // load the data
-        vec3 light_dir = normalized(vec3{ 0,0, 1 });
-        PhongShader shader(model, light_dir, eye);
-        for (int f = 0; f < model.nface(); f++) {      // iterate through all facets
-            shader.color = { 200, 0, 0, 255 };
+        Model model(argv[m]);                       // load the data
+        PhongShader shader(light, model);
+        for (int f = 0; f < model.nfaces(); f++) {      // iterate through all facets
             Triangle clip = { shader.vertex(f, 0),  // assemble the primitive
                               shader.vertex(f, 1),
                               shader.vertex(f, 2) };
